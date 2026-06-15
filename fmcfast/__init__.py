@@ -9,9 +9,15 @@ from .geometry import LinearArray, gabor_pulse
 from .forward import simulate_fmc
 from .tfm import tfm_image, pixel_grid
 from .sampling import uniform_tx_set, observed_mask
-from .freqdomain import to_freq, from_freq, band_bins, symmetrize
+from .freqdomain import (
+    to_freq, from_freq, band_bins, symmetrize, effective_rank, scene_eff_rank,
+)
 from .completion import lowrank_complete
-from .baselines import reconstruct_naive, reconstruct_lowrank
+from .baselines import (
+    reconstruct_naive, reconstruct_lowrank, reconstruct_nystrom,
+    reconstruct_softimpute, reconstruct_joint_lowrank, reconstruct_steering_oracle,
+)
+from .phantom import make_phantom, make_test_phantoms
 from . import metrics
 
 __all__ = [
@@ -29,5 +35,13 @@ __all__ = [
     "lowrank_complete",
     "reconstruct_naive",
     "reconstruct_lowrank",
+    "reconstruct_nystrom",
+    "reconstruct_softimpute",
+    "reconstruct_joint_lowrank",
+    "reconstruct_steering_oracle",
+    "effective_rank",
+    "scene_eff_rank",
+    "make_phantom",
+    "make_test_phantoms",
     "metrics",
 ]

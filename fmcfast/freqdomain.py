@@ -37,3 +37,22 @@ def band_bins(freqs: np.ndarray, f0: float, frac_bw: float) -> np.ndarray:
 def symmetrize(M: np.ndarray) -> np.ndarray:
     """Enforce reciprocity M = M^T (complex-symmetric, not Hermitian)."""
     return 0.5 * (M + M.T)
+
+
+def effective_rank(M: np.ndarray, rcond: float = 1e-3) -> int:
+    """Numerical rank of a matrix: singular values above ``rcond * sigma_max``."""
+    s = np.linalg.svd(M, compute_uv=False)
+    if s.size == 0 or s[0] == 0:
+        return 0
+    return int(np.count_nonzero(s > rcond * s[0]))
+
+
+def scene_eff_rank(cube: np.ndarray, fs: float, f0: float, frac_bw: float,
+                   rcond: float = 1e-3) -> int:
+    """Effective rank of M_f at the centre in-band bin (the scene's rank lever)."""
+    Mf, freqs = to_freq(cube, fs)
+    band = band_bins(freqs, f0, frac_bw)
+    if band.size == 0:
+        return 0
+    fc = band[band.size // 2]
+    return effective_rank(symmetrize(Mf[:, :, fc]), rcond)

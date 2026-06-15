@@ -28,6 +28,37 @@ def band_nrmse(cube_rec: np.ndarray, cube_true: np.ndarray, *,
     return nrmse_complex(Mr[:, :, band], Mt[:, :, band])
 
 
+def band_nrmse_blocks(cube_rec: np.ndarray, cube_true: np.ndarray, observed_mask: np.ndarray,
+                      *, fs: float, f0: float, frac_bw: float) -> Dict[str, float]:
+    """Phase-sensitive in-band NRMSE split by observed / unobserved entries.
+
+    The *unobserved-block* NRMSE is the Phase-1 headline axis (Claim A): naive
+    leaves it at 1.0 (predicts nothing), and low-rank completion only recovers it
+    when rank(M_f) <= K. ``observed_mask`` is the (N, N) frame from
+    ``sampling.observed_mask``.
+    """
+    Mr, freqs = to_freq(cube_rec, fs)
+    Mt, _ = to_freq(cube_true, fs)
+    band = band_bins(freqs, f0, frac_bw)
+    R = Mr[:, :, band]
+    T = Mt[:, :, band]
+    obs = observed_mask[:, :, None]
+    unobs = ~observed_mask
+    unobs3 = unobs[:, :, None]
+
+    def _nrmse(mask3):
+        num = np.linalg.norm((R - T)[np.broadcast_to(mask3, R.shape)])
+        den = np.linalg.norm(T[np.broadcast_to(mask3, T.shape)]) + 1e-12
+        return float(num / den)
+
+    return {
+        "nrmse_overall": nrmse_complex(R, T),
+        "nrmse_unobs": _nrmse(unobs3),
+        "nrmse_obs": _nrmse(obs),
+        "frac_unobs": float(unobs.mean()),
+    }
+
+
 def defect_metrics(
     img: np.ndarray,
     gx: np.ndarray,
