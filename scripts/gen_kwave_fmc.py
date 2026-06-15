@@ -128,23 +128,35 @@ def main():
     ap.add_argument("--out", default="kwave_data")
     ap.add_argument("--n", type=int, default=6)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--start", type=int, default=0, help="first phantom id (for resume/sharding)")
+    ap.add_argument("--max-ndef", type=int, default=8)
+    ap.add_argument("--ndefs", default="", help="comma list of fixed n_def (probe mode); else random")
     ap.add_argument("--cpu", action="store_true")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     geom = build_grid()
     print(f"grid Nx={geom['Nx']} Ny={geom['Ny']} (dx={DX*1e3}mm); {N} elements", flush=True)
 
-    rng = np.random.default_rng(args.seed)
-    n_defs = [1, 1, 2, 3, 4, 6, 8, 10][: args.n]
-    for pid, nd in enumerate(n_defs):
+    # Independent random configs (phantom-level split = no (tx,rx) leakage). The
+    # seed is offset by phantom id so --start can resume/shard deterministically.
+    fixed = [int(x) for x in args.ndefs.split(",") if x] if args.ndefs else None
+    for k in range(args.n):
+        pid = args.start + k
+        rng = np.random.default_rng(args.seed + pid)
+        nd = fixed[k % len(fixed)] if fixed else int(rng.integers(1, args.max_ndef + 1))
+        # skip if already generated (resume)
+        path = os.path.join(args.out, f"kw_{pid:04d}_nd{nd}.npz")
+        if os.path.exists(path):
+            print(f"[{pid}] exists, skip", flush=True)
+            continue
         defects = sample_defects(rng, nd)
         t0 = time.time()
         cube = run_fmc(geom, defects, gpu=not args.cpu)
-        path = os.path.join(args.out, f"kw_{pid:02d}_nd{nd}.npz")
-        np.savez_compressed(path, cube=cube, defects=np.array([(x, z, r) for x, z, r in defects]),
+        np.savez_compressed(path, cube=cube.astype(np.float32),
+                            defects=np.array([(x, z, r) for x, z, r in defects]),
                             c0=C0, f0=F0, fs=FS_OUT, n_t=N_T_OUT, pitch=PITCH, n_elements=N)
-        print(f"[{pid+1}/{len(n_defs)}] nd={nd} -> {path}  ({time.time()-t0:.1f}s, "
-              f"cube max {np.abs(cube).max():.2e})", flush=True)
+        print(f"[{pid}] nd={nd} -> {os.path.basename(path)}  ({time.time()-t0:.1f}s, "
+              f"max {np.abs(cube).max():.2e})", flush=True)
     print("KWAVE_GEN_DONE", flush=True)
 
 
