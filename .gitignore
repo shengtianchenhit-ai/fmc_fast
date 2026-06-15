@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Generated data & artifacts (regenerable; keep out of git)
+data/
+results/*.npz
+results/*.npy
+*.h5
+*.mat
+
+# Keep results figures and CSVs tracked by default? No — keep light.
+results/*.png
+results/*.csv
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

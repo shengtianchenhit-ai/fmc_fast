@@ -1,0 +1,8 @@
+# Phase-0 (baseline map) dependencies — pure CPU, runs anywhere.
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.6
+pyyaml>=6.0
+tqdm>=4.64
+
+# Phase-1+ (on the GPU server, separate env): torch, k-wave-python.

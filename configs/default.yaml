@@ -1,0 +1,44 @@
+# Default Phase-0 configuration.
+# Units are SI throughout: metres, seconds, hertz.
+
+array:
+  n_elements: 64
+  pitch: 0.5e-3          # 0.5 mm element pitch
+
+medium:
+  c: 6300.0             # longitudinal speed in steel [m/s]
+
+pulse:
+  f0: 5.0e6             # centre frequency 5 MHz
+  n_cycles: 2.0         # ~2-cycle excitation (broadband)
+  frac_bw: 0.6          # fractional bandwidth used to pick the frequency band
+
+acq:
+  fs: 50.0e6            # 50 MHz sampling
+  n_t: 1024             # samples per A-scan (covers the imaging depth)
+
+grid:                    # TFM imaging region
+  x_min: -16.0e-3
+  x_max:  16.0e-3
+  z_min:   2.0e-3
+  z_max:  40.0e-3
+  dx: 0.4e-3            # pixel size (coarser = faster Phase-0 runs)
+
+dataset:
+  n_test: 12            # number of independent test phantoms (small demo)
+  seed: 0
+  defect:
+    x_range: [-10.0e-3, 10.0e-3]
+    z_range: [ 8.0e-3, 35.0e-3]
+    reflectivity: 1.0
+  noise_db: 40.0        # additive white noise on A-scans (signal-to-noise, dB); null to disable
+  n_grain: 0            # number of weak random grain scatterers (0 = clean)
+
+# Transmit budgets to sweep. Acceleration = n_elements / K (see README for HMC convention).
+sampling:
+  tx_counts: [64, 32, 16, 8, 6, 4]
+
+# Low-rank (Nyström) completion baseline. `rank` caps the pseudo-inverse so noise
+# in negligible singular values is not amplified (>= expected physical DOF).
+lowrank:
+  rank: 4
