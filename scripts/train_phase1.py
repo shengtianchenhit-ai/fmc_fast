@@ -69,6 +69,7 @@ def main():
     ap.add_argument("--out", default="results/phase1_ckpt.pt")
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--resume", action="store_true", help="resume from <out>_last.pt if present")
+    ap.add_argument("--gate", action="store_true", help="gate out the direct wave (train on defect echo)")
     args = ap.parse_args()
 
     if args.smoke:
@@ -82,8 +83,8 @@ def main():
         va_files = tr_files
     print(f"device={device}  train={len(tr_files)} val={len(va_files)} test={len(te_files)}", flush=True)
 
-    train_ds = KWaveMfDataset(tr_files, fs=FS, f0=F0, train=True)
-    val_ds = KWaveMfDataset(va_files, fs=FS, f0=F0, train=False, fixed_k=8)
+    train_ds = KWaveMfDataset(tr_files, fs=FS, f0=F0, train=True, gate=args.gate)
+    val_ds = KWaveMfDataset(va_files, fs=FS, f0=F0, train=False, fixed_k=8, gate=args.gate)
     F = train_ds.F
     loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
                         num_workers=args.workers, drop_last=False)

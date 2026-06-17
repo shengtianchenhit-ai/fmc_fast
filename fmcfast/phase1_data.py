@@ -29,11 +29,18 @@ def _band(fs: float, n_t: int, f0: float, frac_bw: float) -> np.ndarray:
 class KWaveMfDataset(Dataset):
     def __init__(self, files: Sequence[str], *, fs: float, f0: float, frac_bw: float = 0.6,
                  train: bool = True, k_choices: Sequence[int] = (16, 8, 6, 4),
-                 fixed_k: Optional[int] = None):
+                 fixed_k: Optional[int] = None, gate: bool = False, guard_mm: float = 4.0):
         self.mfs: List[np.ndarray] = []
         for fpath in files:
             d = np.load(fpath)
             cube = d["cube"].astype(np.float32)
+            if gate:
+                # remove the direct surface wave so the net trains on the defect echo
+                # (the NDE-relevant, energy-tiny signal the full-cube loss drowns out).
+                nn = int(d["n_elements"]); x = (np.arange(nn) - (nn - 1) / 2.0) * float(d["pitch"])
+                cut = np.abs(x[:, None] - x[None, :]) / float(d["c0"]) + guard_mm * 1e-3 / float(d["c0"])
+                t = np.arange(cube.shape[2]) / fs
+                cube = cube * (t[None, None, :] >= cut[:, :, None]).astype(np.float32)
             Mf = np.fft.rfft(cube, axis=2)
             band = _band(fs, cube.shape[2], f0, frac_bw)
             mf = np.transpose(Mf[:, :, band], (2, 0, 1)).astype(np.complex64)  # (F,N,N)
