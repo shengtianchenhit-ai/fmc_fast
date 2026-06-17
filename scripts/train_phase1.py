@@ -68,6 +68,7 @@ def main():
     ap.add_argument("--device", default="auto")
     ap.add_argument("--out", default="results/phase1_ckpt.pt")
     ap.add_argument("--smoke", action="store_true")
+    ap.add_argument("--resume", action="store_true", help="resume from <out>_last.pt if present")
     args = ap.parse_args()
 
     if args.smoke:
@@ -94,8 +95,16 @@ def main():
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs * max(1, len(loader)))
 
     best = 1e9
+    start_ep = 0
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    for ep in range(args.epochs):
+    last_path = args.out.replace(".pt", "_last.pt")
+    done_path = args.out.replace(".pt", "_done.txt")
+    if args.resume and os.path.exists(last_path):
+        ck = torch.load(last_path, map_location=device)
+        model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); sched.load_state_dict(ck["sched"])
+        start_ep, best = ck["epoch"] + 1, ck["best"]
+        print(f"resumed from epoch {start_ep} (best {best:.4f})", flush=True)
+    for ep in range(start_ep, args.epochs):
         t0 = time.time()
         tot, nb = 0.0, 0
         for x, y, m, _ in loader:
@@ -112,8 +121,14 @@ def main():
             if vmean < best:
                 best = vmean
                 torch.save({"model": model.state_dict(), "F": F, "base": args.base}, args.out)
+            # checkpoint for resume (model + optimizer + schedule + epoch) every eval
+            torch.save({"model": model.state_dict(), "opt": opt.state_dict(),
+                        "sched": sched.state_dict(), "epoch": ep, "best": best,
+                        "F": F, "base": args.base}, last_path)
             print(f"ep {ep:3d}  train {tot/nb:.4f}  val nrmse_unobs "
                   f"K16={ev[16]:.3f} K8={ev[8]:.3f} K4={ev[4]:.3f}  ({time.time()-t0:.1f}s)", flush=True)
+    with open(done_path, "w") as fh:
+        fh.write(f"best_val={best:.4f}")
     print(f"DONE best_val={best:.4f} -> {args.out}", flush=True)
 
 
