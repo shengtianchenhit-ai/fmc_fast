@@ -67,11 +67,50 @@ def make_medium(geom, defects):
     return rho
 
 
-def run_fmc(geom, defects, *, gpu=True):
+def sample_cracks(rng, n):
+    """n thin, tilted, rough cracks — specular + diffuse, strongly angle-dependent,
+    so the analytic isotropic-monopole steering model is mis-specified."""
+    x_range, z_range = (-8e-3, 8e-3), (12e-3, 30e-3)
+    cracks = []
+    for _ in range(n):
+        L = float(rng.uniform(2e-3, 6e-3))
+        tilt = float(rng.uniform(-np.pi / 3, np.pi / 3))     # +-60 deg from horizontal
+        thick = float(rng.uniform(0.2e-3, 0.4e-3))
+        cx = float(rng.uniform(x_range[0] + L / 2, x_range[1] - L / 2))
+        cz = float(rng.uniform(z_range[0] + L / 2, z_range[1] - L / 2))
+        rfreq = float(rng.uniform(2, 5) / L)                  # rough-face spatial freq
+        rphase = float(rng.uniform(0, 2 * np.pi))
+        cracks.append((cx, cz, L, tilt, thick, rfreq, rphase))
+    return cracks
+
+
+def make_medium_cracks(geom, cracks):
+    Nx, Ny = geom["Nx"], geom["Ny"]
+    rho = np.full((Nx, Ny), RHO0, dtype=np.float32)
+    rr, cc = np.mgrid[0:Nx, 0:Ny]
+    X = (cc - geom["col_center"]) * DX
+    Z = (rr - geom["z_surf"]) * DX
+    for (cx, cz, L, tilt, thick, rfreq, rphase) in cracks:
+        u = (X - cx) * np.cos(tilt) + (Z - cz) * np.sin(tilt)
+        v = -(X - cx) * np.sin(tilt) + (Z - cz) * np.cos(tilt)
+        half_t = 0.5 * thick * (1.0 + 0.6 * np.sin(2 * np.pi * rfreq * u + rphase))  # rough faces
+        rho[(np.abs(u) <= L / 2) & (np.abs(v) <= np.abs(half_t))] = RHO_DEF
+    return rho
+
+
+def crack_points(cracks, n_pts=5):
+    """Points along each crack centerline — the fairest analytic line-of-monopoles model."""
+    pts = []
+    for (cx, cz, L, tilt, *_rest) in cracks:
+        for t in np.linspace(-L / 2, L / 2, n_pts):
+            pts.append((float(cx + t * np.cos(tilt)), float(cz + t * np.sin(tilt)), 1.0))
+    return pts
+
+
+def run_fmc(geom, rho, *, gpu=True):
     Nx, Ny = geom["Nx"], geom["Ny"]
     elem_cols = geom["elem_cols"].astype(int)
-    z_surf = geom["z_surf"]
-    rho = make_medium(geom, defects)               # density map; copied per sim
+    z_surf = geom["z_surf"]                         # rho: prebuilt density map, copied per sim
 
     kg0 = kWaveGrid([Nx, Ny], [DX, DX])
     kg0.makeTime(C0, t_end=T_END)
@@ -131,6 +170,7 @@ def main():
     ap.add_argument("--start", type=int, default=0, help="first phantom id (for resume/sharding)")
     ap.add_argument("--max-ndef", type=int, default=8)
     ap.add_argument("--ndefs", default="", help="comma list of fixed n_def (probe mode); else random")
+    ap.add_argument("--defect", default="disk", choices=["disk", "crack"])
     ap.add_argument("--cpu", action="store_true")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -143,19 +183,29 @@ def main():
     for k in range(args.n):
         pid = args.start + k
         rng = np.random.default_rng(args.seed + pid)
-        nd = fixed[k % len(fixed)] if fixed else int(rng.integers(1, args.max_ndef + 1))
-        # skip if already generated (resume)
+        if args.defect == "crack":
+            nd = int(rng.integers(1, 5))                       # 1-4 cracks
+        else:
+            nd = fixed[k % len(fixed)] if fixed else int(rng.integers(1, args.max_ndef + 1))
         path = os.path.join(args.out, f"kw_{pid:04d}_nd{nd}.npz")
-        if os.path.exists(path):
+        if os.path.exists(path):                               # resume: skip done
             print(f"[{pid}] exists, skip", flush=True)
             continue
-        defects = sample_defects(rng, nd)
+        if args.defect == "crack":
+            cracks = sample_cracks(rng, nd)
+            rho = make_medium_cracks(geom, cracks)
+            defects = crack_points(cracks)                     # line-of-monopoles for analytic baseline
+            extra = {"cracks": np.array(cracks)}
+        else:
+            defects = sample_defects(rng, nd)
+            rho = make_medium(geom, defects)
+            extra = {}
         t0 = time.time()
-        cube = run_fmc(geom, defects, gpu=not args.cpu)
+        cube = run_fmc(geom, rho, gpu=not args.cpu)
         np.savez_compressed(path, cube=cube.astype(np.float32),
                             defects=np.array([(x, z, r) for x, z, r in defects]),
-                            c0=C0, f0=F0, fs=FS_OUT, n_t=N_T_OUT, pitch=PITCH, n_elements=N)
-        print(f"[{pid}] nd={nd} -> {os.path.basename(path)}  ({time.time()-t0:.1f}s, "
+                            c0=C0, f0=F0, fs=FS_OUT, n_t=N_T_OUT, pitch=PITCH, n_elements=N, **extra)
+        print(f"[{pid}] {args.defect} nd={nd} -> {os.path.basename(path)}  ({time.time()-t0:.1f}s, "
               f"max {np.abs(cube).max():.2e})", flush=True)
     print("KWAVE_GEN_DONE", flush=True)
 
