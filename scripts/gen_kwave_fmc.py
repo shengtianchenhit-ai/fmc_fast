@@ -107,13 +107,26 @@ def crack_points(cracks, n_pts=5):
     return pts
 
 
-def run_fmc(geom, rho, *, gpu=True):
+def make_velocity_field(geom, rng, amp=0.04, corr_mm=4.0):
+    """Smooth random sound-speed field (mimics coarse-grain / austenitic-weld velocity
+    variation). Breaks the homogeneous-c assumption that TFM and the steering model rely on,
+    while staying smooth (well-sampled) and numerically stable."""
+    from scipy.ndimage import gaussian_filter
+    Nx, Ny = geom["Nx"], geom["Ny"]
+    f = rng.standard_normal((Nx, Ny)).astype(np.float32)
+    f = gaussian_filter(f, sigma=corr_mm * 1e-3 / DX)
+    f = f / (f.std() + 1e-9)
+    return (C0 * (1.0 + amp * f)).astype(np.float32)
+
+
+def run_fmc(geom, rho, *, sound_speed=C0, gpu=True):
     Nx, Ny = geom["Nx"], geom["Ny"]
     elem_cols = geom["elem_cols"].astype(int)
-    z_surf = geom["z_surf"]                         # rho: prebuilt density map, copied per sim
+    z_surf = geom["z_surf"]                         # rho: density map; sound_speed: scalar or map
+    c_max = float(np.max(sound_speed))              # CFL uses the max speed
 
     kg0 = kWaveGrid([Nx, Ny], [DX, DX])
-    kg0.makeTime(C0, t_end=T_END)
+    kg0.makeTime(c_max, t_end=T_END)
     dt = kg0.dt
     t_kwave = np.arange(int(kg0.Nt)) * dt
     t_out = np.arange(N_T_OUT) / FS_OUT
@@ -124,8 +137,9 @@ def run_fmc(geom, rho, *, gpu=True):
         # fresh objects each transmit: pml_inside=False expands kgrid in place, so
         # reusing kgrid/sensor across sims corrupts the binary-mask shape check.
         kgrid = kWaveGrid([Nx, Ny], [DX, DX])
-        kgrid.makeTime(C0, t_end=T_END)
-        medium = kWaveMedium(sound_speed=C0, density=rho.copy())
+        kgrid.makeTime(c_max, t_end=T_END)
+        ss = sound_speed.copy() if np.ndim(sound_speed) > 0 else sound_speed
+        medium = kWaveMedium(sound_speed=ss, density=rho.copy())
         sensor = kSensor()
         smask = np.zeros((Nx, Ny)); smask[z_surf, elem_cols] = 1
         sensor.mask = smask
@@ -171,6 +185,8 @@ def main():
     ap.add_argument("--max-ndef", type=int, default=8)
     ap.add_argument("--ndefs", default="", help="comma list of fixed n_def (probe mode); else random")
     ap.add_argument("--defect", default="disk", choices=["disk", "crack"])
+    ap.add_argument("--hetero", action="store_true", help="heterogeneous (smooth random) sound speed")
+    ap.add_argument("--vel-amp", type=float, default=0.04, help="velocity-field fractional amplitude")
     ap.add_argument("--cpu", action="store_true")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -200,11 +216,13 @@ def main():
             defects = sample_defects(rng, nd)
             rho = make_medium(geom, defects)
             extra = {}
+        sound_speed = make_velocity_field(geom, rng, amp=args.vel_amp) if args.hetero else C0
         t0 = time.time()
-        cube = run_fmc(geom, rho, gpu=not args.cpu)
+        cube = run_fmc(geom, rho, sound_speed=sound_speed, gpu=not args.cpu)
         np.savez_compressed(path, cube=cube.astype(np.float32),
                             defects=np.array([(x, z, r) for x, z, r in defects]),
-                            c0=C0, f0=F0, fs=FS_OUT, n_t=N_T_OUT, pitch=PITCH, n_elements=N, **extra)
+                            c0=C0, f0=F0, fs=FS_OUT, n_t=N_T_OUT, pitch=PITCH, n_elements=N,
+                            hetero=int(args.hetero), vel_amp=float(args.vel_amp), **extra)
         print(f"[{pid}] {args.defect} nd={nd} -> {os.path.basename(path)}  ({time.time()-t0:.1f}s, "
               f"max {np.abs(cube).max():.2e})", flush=True)
     print("KWAVE_GEN_DONE", flush=True)
