@@ -2,9 +2,13 @@
 """Phase-1b decisive eval: trained net vs the classical frontier on held-out
 k-Wave TEST cubes, same metric (unobserved-block band_nrmse), same uniform masks.
 
-Also reports the direct-wave ablation: re-score with the early direct-arrival
-samples time-gated out, so we see how much of the win is the deterministic surface
-wave vs the harder finite-size defect scattering.
+Reports TWO scorings per method:
+  * full   -- on the whole cube (energy-dominated by the direct surface wave)
+  * gated  -- after time-gating out the direct arrival, so it scores reconstruction
+              of the weak finite-size DEFECT echo, which is what matters for NDE.
+
+If the net's win survives gating, it is learning real defect physics; if it
+collapses, the headline win was mostly the deterministic direct wave.
 
     python scripts/eval_phase1.py --data-dir kwave_train --ckpt results/phase1_ckpt.pt
 """
@@ -22,42 +26,48 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fmcfast import LinearArray, metrics
 from fmcfast.baselines import (reconstruct_naive, reconstruct_nystrom,
                                reconstruct_steering_oracle)
-from fmcfast.phase1_data import KWaveMfDataset, split_files
-from fmcfast.phase1_model import UNet, apply_constraints, cube_loss
+from fmcfast.phase1_data import KWaveMfDataset, split_files, _band
+from fmcfast.phase1_model import UNet, apply_constraints
 from fmcfast.sampling import observed_mask, uniform_tx_set
 
 FS, F0, BW = 50e6, 5e6, 0.6
 NYS = [{"rank": r, "rcond": rc} for r in (2, 4, 8, 12, 16) for rc in (1e-8, 1e-4, 1e-2)]
 
 
-def gate_direct(cube, array, c, fs, guard_mm=3.0):
-    """Zero samples before the shortest defect-free two-way time + guard, i.e. remove
-    the direct surface wave (which travels along the surface, arriving earliest)."""
-    n, _, n_t = cube.shape
-    x = array.x
-    # direct path tx->rx along surface = |x_i - x_j|; gate a bit beyond the max direct.
-    tt = (np.abs(x[:, None] - x[None, :]) / c)  # (N,N) one-way surface time
-    gated = cube.copy()
+def gate_direct(cube, x, c, fs, guard_mm=4.0):
+    """Zero samples before |x_i - x_j|/c + guard -> removes the direct surface wave."""
+    n_t = cube.shape[2]
+    cut = np.abs(x[:, None] - x[None, :]) / c + guard_mm * 1e-3 / c   # (N,N)
     t = np.arange(n_t) / fs
-    for i in range(n):
-        for j in range(n):
-            cut = tt[i, j] + guard_mm * 1e-3 / c
-            gated[i, j, t < cut] = 0.0
-    return gated
+    keep = (t[None, None, :] >= cut[:, :, None])                       # (N,N,n_t)
+    return cube * keep
+
+
+def net_cube(pred, s, F, band, n_t):
+    """Net's M_f output -> band-limited time cube (mirrors baselines)."""
+    p = pred[0].detach().cpu().numpy()
+    mf = (p[:F] + 1j * p[F:]) * s                                     # (F,N,N)
+    full = np.zeros((mf.shape[1], mf.shape[2], n_t // 2 + 1), complex)
+    full[:, :, band] = np.transpose(mf, (1, 2, 0))
+    return np.fft.irfft(full, n=n_t, axis=2)
+
+
+def unobs(rec, true, obs):
+    return metrics.band_nrmse_blocks(rec, true, obs, fs=FS, f0=F0, frac_bw=BW)["nrmse_unobs"]
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", default="kwave_train")
     ap.add_argument("--ckpt", default="results/phase1_ckpt.pt")
-    ap.add_argument("--ks", default="16,8,6,4")
+    ap.add_argument("--ks", default="16,8,4")
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
-    device = torch.device(args.device if torch.cuda.is_available() or args.device != "cuda" else "cpu")
+    device = torch.device(args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu")
 
     test_files = split_files(args.data_dir)[2]
-    print(f"test cubes: {len(test_files)}", flush=True)
     ks = [int(k) for k in args.ks.split(",")]
+    print(f"test cubes: {len(test_files)}  device={device}", flush=True)
 
     ck = torch.load(args.ckpt, map_location=device)
     F = ck["F"]
@@ -68,32 +78,41 @@ def main():
     cubes = [np.load(f) for f in test_files]
     n = int(cubes[0]["n_elements"])
     array = LinearArray(n, float(cubes[0]["pitch"]))
-    fkw = dict(fs=FS, f0=F0, frac_bw=BW)
+    n_t = int(cubes[0]["n_t"])
+    band = _band(FS, n_t, F0, BW)
 
-    print(f"\n{'K (accel)':>12} | {'net':>7} {'naive':>7} {'nystrom':>8} {'steer_orc':>9}")
-    rows = {}
+    hdr = f"{'method':>9} | " + "  ".join(f"K={k}(full/gated)" for k in ks)
+    print("\n" + hdr, flush=True)
+    agg = {m: {k: ([], []) for k in ks} for m in ("net", "naive", "nystrom", "steer")}
     for K in ks:
         ds.fixed_k = K
-        net_e, nai, nys, ste = [], [], [], []
         for idx, d in enumerate(cubes):
             cube = d["cube"].astype(float)
-            defects = [(float(x), float(z), 1.0) for x, z, r in d["defects"]]
+            c = float(d["c0"])
+            defects = [(float(px), float(pz), 1.0) for px, pz, r in d["defects"]]
             S = uniform_tx_set(n, K); obs = observed_mask(n, S)
-            # net
-            x, y, m, _ = ds[idx]
+            cube_g = gate_direct(cube, array.x, c, FS)
+            x, _, m, s = ds[idx]
             with torch.no_grad():
                 pred = apply_constraints(model(x[None].to(device)), m[None].to(device),
                                          x[None, : 2 * F].to(device), F)
-                net_e.append(cube_loss(pred, y[None].to(device), m[None].to(device)).item())
-            # classical
-            nai.append(metrics.band_nrmse_blocks(reconstruct_naive(cube, S), cube, obs, **fkw)["nrmse_unobs"])
-            nys.append(min(metrics.band_nrmse_blocks(reconstruct_nystrom(cube, S, **fkw, **hp), cube, obs, **fkw)["nrmse_unobs"] for hp in NYS))
-            ste.append(metrics.band_nrmse_blocks(reconstruct_steering_oracle(cube, S, defects, array, c=float(d["c0"]), **fkw), cube, obs, **fkw)["nrmse_unobs"])
-        accel = (n / int(uniform_tx_set(n, K).size)) / 2.0
-        rows[K] = (np.median(net_e), np.median(nai), np.median(nys), np.median(ste))
-        print(f"K={K:>2} ({accel:>3.1f}x) | {rows[K][0]:>7.3f} {rows[K][1]:>7.3f} {rows[K][2]:>8.3f} {rows[K][3]:>9.3f}", flush=True)
-
-    print("\n(unobserved-block band_nrmse, median over test cubes; lower=better)")
+            recs = {
+                "net": net_cube(pred, s, F, band, n_t),
+                "naive": reconstruct_naive(cube, S),
+                "nystrom": min((reconstruct_nystrom(cube, S, fs=FS, f0=F0, frac_bw=BW, **hp) for hp in NYS),
+                               key=lambda r: unobs(r, cube, obs)),
+                "steer": reconstruct_steering_oracle(cube, S, defects, array, c=c, fs=FS, f0=F0, frac_bw=BW),
+            }
+            for mth, rec in recs.items():
+                agg[mth][K][0].append(unobs(rec, cube, obs))
+                agg[mth][K][1].append(unobs(gate_direct(rec, array.x, c, FS), cube_g, obs))
+    for mth in ("net", "naive", "nystrom", "steer"):
+        cells = []
+        for K in ks:
+            f = np.median(agg[mth][K][0]); g = np.median(agg[mth][K][1])
+            cells.append(f"{f:.3f}/{g:.3f}")
+        print(f"{mth:>9} | " + "      ".join(cells), flush=True)
+    print("\n(unobserved-block band_nrmse, median; full = whole cube, gated = direct wave removed)")
     print("EVAL_DONE", flush=True)
 
 
