@@ -144,7 +144,8 @@ def reconstruct_joint_lowrank(cube, tx_set, *, fs, f0, frac_bw, lam_rel, n_iter=
     return from_freq(Mf_rec, n_t)
 
 
-def reconstruct_steering_oracle(cube, tx_set, defects, array, *, fs, f0, frac_bw, c):
+def reconstruct_steering_oracle(cube, tx_set, defects, array, *, fs, f0, frac_bw, c,
+                                rcond=1e-3):
     """Parametric ceiling: oracle-SUPPORT steering fit (upper bound on any prior).
 
     Given the TRUE defect positions, fit a complex amplitude per defect per bin from
@@ -172,6 +173,6 @@ def reconstruct_steering_oracle(cube, tx_set, defects, array, *, fs, f0, frac_bw
             w = 2.0 * np.pi * freqs[fb]
             A = np.exp(-1j * w * dist / c) / np.sqrt(dist)     # (N, D) steering atoms
             Gd = A[ii, :] * A[jj, :]                            # (|O|, D) over observed
-            g, *_ = np.linalg.lstsq(Gd, Mf[ii, jj, fb], rcond=None)
+            g, *_ = np.linalg.lstsq(Gd, Mf[ii, jj, fb], rcond=rcond)
             Mf_rec[:, :, fb] = (A * g) @ A.T                    # sum_k g_k a_k a_k^T
     return from_freq(Mf_rec, n_t)
